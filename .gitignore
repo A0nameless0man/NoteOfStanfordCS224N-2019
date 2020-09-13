@@ -1,3 +1,5 @@
 tmp/
 media/
 download/
+*.tr
+*.txt
