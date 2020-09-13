@@ -12,6 +12,8 @@ import time
 import math
 import os
 import gc
+from torch.multiprocessing import Pool
+import functools
 
 
 class Timer:
@@ -98,15 +100,9 @@ class WordVec(nn.Module):
         return (loss)
 
 
-def text_to_vec(text, map):
-    ids = [map[x] for x in text]
-    return torch.LongTensor(ids)
-
-
-def rand_neg(neg_count: int, wordBucket):
-    # print(wordBucket)
-    return torch.LongTensor(random.sample(wordBucket, neg_count))
-
+def neg_sample(NEG_COUNT, wordBucket, case):
+    return (case[0], case[1],
+            torch.LongTensor(random.sample(wordBucket, NEG_COUNT)))
 
 def loadDataFile(folder, sufix):
     dirInfo = os.walk(folder)
@@ -155,7 +151,7 @@ def main():
     TRAIN_ROUND = 1000
     DATA_BATCH_SIZE = 128
     # BATCH_SIZE = 8  # how many cases there are in each batch
-    DARA_WORKERS = 4
+    DATA_WORKERS = 4
     BATCH_SIZE = 1024 * 24 * 4  # how many cases there are in each batch
     NEG_COUNT = 5  # how many neg case in each case
     NEG_GROUP = 10  # how many group of neg case there are for every postive case
@@ -321,22 +317,37 @@ def main():
                               (pos_finish_cnt, DATA_BATCH_SIZE),
                               end="\r")
                 print(
-                    "Loaded %20d Postive Simple in %15f sec from dataBatch %10d / %10d"
+                    "Loaded %20d Postive Simple in %15f sec from dataBatch %3d / %3d round %5d"
                     % (len(rawdata), timerPostiveSample.elapsed, dataBatch,
-                       dataBatchCnt))
+                       dataBatchCnt, roundid))
 
                 # -------------------------------
                 print("resampling for round %d dataBatch %d" %
                       (roundid, dataBatch))
                 data = []
-                for case in rawdata:
-                    for i in range(NEG_GROUP):
-                        neg = torch.LongTensor(rand_neg(NEG_COUNT, wordBucket))
-                        data.append((case[0], case[1], neg))
+                for _ in range(NEG_GROUP):
+                    # with Pool(DATA_WORKERS) as pool:
+                    data.extend(
+                        map(
+                            functools.partial(neg_sample, NEG_COUNT,
+                                              wordBucket), rawdata))
+                # data = NegDataLoader(rawdata, wordBucket, NEG_COUNT, NEG_GROUP)
+                # print(1)
+                # negdata = next(
+                #     iter(
+                #         torch.utils.data.DataLoader(data,
+                #                                     batch_size=len(data),
+                #                                     num_workers=DATA_WORKERS,
+                #                                     shuffle=False)))
+                # print(2)
+                # finaldata = [(negdata[0][i], negdata[1][i], negdata[2][i])
+                #              for i in range(len(data))]
+                # print(finaldata[0:1])
+                # print(3)
                 dataloader = torch.utils.data.DataLoader(
                     data,
                     batch_size=BATCH_SIZE,
-                    num_workers=DARA_WORKERS,
+                    num_workers=DATA_WORKERS,
                     #  shuffle=True)
                     shuffle=False)
                 print("resampled for round %d databatch %d" %
