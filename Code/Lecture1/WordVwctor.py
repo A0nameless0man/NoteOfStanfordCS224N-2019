@@ -15,7 +15,8 @@ import os
 import gc
 import functools
 import datetime
-from tensorboardX import SummaryWriter
+# from tensorboardX import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 import sys
 
 DATE_STRING = datetime.datetime.now().strftime("%Y-%m-%dT%H%M%S")
@@ -70,6 +71,17 @@ def adjust_learning_rate(optimizer, epoch, lr):
     if not math.isnan(lr):
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
+
+
+def get_gpu_tem():
+    # shell_str = "tem_line=`nvidia-smi | grep %` && tem1=`echo $tem_line | cut -d C -f 1` " \
+    #             "&& tem2=`echo $tem1 | cut -d % -f 2` && echo $tem2"
+    shell_str = "nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader"
+    result = os.popen(shell_str)
+    result_str = result.read()
+    tem_str = result_str.split("\n")[0]
+    result.close()
+    return float(tem_str)
 
 
 class WordVec(nn.Module):
@@ -212,9 +224,13 @@ def main():
         info = torch.cuda.get_device_properties(i)
         writer.add_text(
             "info/Cuda device/ %d : %s" % (i, info.name),
-            "CUDA CC %d.%d ;MEM %dMB ;MultiProcessorCount %d" %
+            "CUDA CC %d.%d \nMEM %dMB \nMultiProcessorCount %d" %
             (info.major, info.minor, info.total_memory /
              (1024**2), info.multi_processor_count))
+    constant_regex = re.compile("^([A-Z]+_)*[A-Z]+$")
+    for (key, value) in locals().items():
+        if constant_regex.match(key):
+            writer.add_text("config/%s" % (key), str(value))
     writer.add_text("info/Python version", sys.version)
     writer.add_text("info/Data Folder", DATA_FOLDER)
     print("%10d data file found" % (len(dataFiles)))
@@ -322,9 +338,9 @@ def main():
                             target = torch.LongTensor([idtext[i]])
                             rawdata.append((context, target))
                         pos_finish_cnt += 1
-                        print("Postive Simple Progress %15d in %15d" %
-                              (pos_finish_cnt, DATA_BATCH_SIZE),
-                              end="\r")
+                        # print("Postive Simple Progress %15d in %15d" %
+                        #       (pos_finish_cnt, DATA_BATCH_SIZE),
+                        #       end="\r")
                 print(
                     "Loaded %20d Postive Simple in %15f sec from dataBatch %3d / %3d round %5d"
                     % (len(rawdata), timerPostiveSample.elapsed, dataBatch,
@@ -380,6 +396,8 @@ def main():
                     #----------------------------------------------------------------
                     writer.add_scalars("loss", {"epoch": epochloss},
                                        batchcnt - batchOfCurEpoch // 2)
+                    writer.add_scalars("temp", {"GPU": get_gpu_tem()},
+                                       epochcount)
                     # writer.add_scalar("lr", LR, batchcnt)
                     print("%10f %10f %10d" % (epochloss, LR, epochcount))
                     #----------------------------------------------------------------
