@@ -1,5 +1,6 @@
 tmp/
 media/
 download/
+events.out.tfevents.*
 *.tr
 *.txt
