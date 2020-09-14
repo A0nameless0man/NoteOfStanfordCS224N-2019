@@ -10,10 +10,16 @@ from torch.autograd import Variable
 import torch.optim as optim
 import time
 import math
+from pathlib import Path
 import os
 import gc
-from torch.multiprocessing import Pool
 import functools
+import datetime
+from tensorboardX import SummaryWriter
+import sys
+
+DATE_STRING = datetime.datetime.now().strftime("%Y-%m-%dT%H%M%S")
+# DATE_STRING = datetime.datetime.now().replace(microsecond=0).isoformat()
 
 
 class Timer:
@@ -104,6 +110,7 @@ def neg_sample(NEG_COUNT, wordBucket, case):
     return (case[0], case[1],
             torch.LongTensor(random.sample(wordBucket, NEG_COUNT)))
 
+
 def loadDataFile(folder, sufix):
     dirInfo = os.walk(folder)
     files = []
@@ -149,7 +156,7 @@ def main():
     MAX_NORM = 10
     EPOCH_COUNT = 10  # how many epoch to train before rerand neg case
     TRAIN_ROUND = 1000
-    DATA_BATCH_SIZE = 128
+    DATA_BATCH_SIZE = 32
     # BATCH_SIZE = 8  # how many cases there are in each batch
     DATA_WORKERS = 4
     BATCH_SIZE = 1024 * 24 * 4  # how many cases there are in each batch
@@ -167,27 +174,27 @@ def main():
     # LR = 0.0003
     MOMENTUM = 0.75
     DAMPENING = 0.1
-    NET_SAVE_FOLDER = "data/nets/Adam/"
-    NET_SAVE_PREFIX = "A"
+    NET_SAVE_FOLDER = "results/Adam/%s/net" % (DATE_STRING)
+    LOG_SAVE_FOLDER = "results/Adam/%s/log" % (DATE_STRING)
+    TEXT_SAVE_FOLDER = "results/Adam/%s/text" % (DATE_STRING)
+    NET_SAVE_PREFIX = "net-%s.tr"
     DATA_FOLDER = "../../download/OANC-GrAF/data"
     DATA_SUFFIX = ".txt"
-    DICTIONARY_PATH = "dictionary.txt"
-    WORD_COUNT_PATH = "word_count.txt"
-    MODIFIED_WORD_COUNT_PATH = "word_count.mod.txt"
+    DICTIONARY_PATH = TEXT_SAVE_FOLDER + "/dictionary.txt"
+    WORD_COUNT_PATH = TEXT_SAVE_FOLDER + "/word_count.txt"
+    MODIFIED_WORD_COUNT_PATH = TEXT_SAVE_FOLDER + "/word_count.mod.txt"
     if DEBUG:
         DEVICE = "cpu"
         NEG_GROUP = 1  # how many group of neg case there are for every postive case
         VECDIM = 30  # WordVec dim to use
         NET_SAVE_PREFIX += "-DEBUG"
 
-    NET_SAVE_FILENAME_TEMPLATE = NET_SAVE_FOLDER + NET_SAVE_PREFIX
-    # text = """We are about to study the idea of a computational process.
-    # Computational processes are abstract beings that inhabit computers.
-    # As they evolve, processes manipulate other abstract things called data.
-    # The evolution of a process is directed by a pattern of rules
-    # called a program. People create programs to direct processes. In effect,
-    # we conjure the spirits of the computer with our spells. """.split()
+    NET_SAVE_FILENAME_TEMPLATE = NET_SAVE_FOLDER + "/" + NET_SAVE_PREFIX
 
+    for folder in [NET_SAVE_FOLDER, LOG_SAVE_FOLDER, TEXT_SAVE_FOLDER]:
+        Path(folder).mkdir(parents=True, exist_ok=True)
+
+    writer = SummaryWriter(LOG_SAVE_FOLDER)
     dataFiles = loadDataFile(DATA_FOLDER, DATA_SUFFIX)
     fileContents = []
     wordset = []
@@ -197,8 +204,19 @@ def main():
     wordcnt = collections.Counter()
     modifiedwordcount = {}
     wordBucket = []
-
     lengthCnt = 0
+    writer.add_text("info/PyTorch version", torch.__version__)
+    writer.add_text("info/Cuda version", str(torch.version.cuda))
+    writer.add_text("info/Cuda Device Count", str(torch.cuda.device_count()))
+    for i in range(torch.cuda.device_count()):
+        info = torch.cuda.get_device_properties(i)
+        writer.add_text(
+            "info/Cuda device/ %d : %s" % (i, info.name),
+            "CUDA CC %d.%d ;MEM %dMB ;MultiProcessorCount %d" %
+            (info.major, info.minor, info.total_memory /
+             (1024**2), info.multi_processor_count))
+    writer.add_text("info/Python version", sys.version)
+    writer.add_text("info/Data Folder", DATA_FOLDER)
     print("%10d data file found" % (len(dataFiles)))
     with Timer() as fileLoadTimer:
         for filePath in dataFiles:
@@ -276,20 +294,11 @@ def main():
     # for epoch in range(EPOCH_COUNT):
     print("Start in %s mode" % (DEVICE))
 
-    outputtitlecount = 0
-    outputcount = 0
     epochcount = 0
-    accumateloss = 0.0
     epochaccloss = 0.0
+    negGroupAccloss = 0.0
     batchcnt = 0
-    epochloss = 2.0
-    curepochloss = 2.0
-    imporve_rate_by_epoch = 0.0
-    timeacc = 0.0
-    losses_for_shrink = []
     lr_tim = 1.
-    shrink_cnt = 0
-    back_count = 0
     for roundid in range(TRAIN_ROUND):
         with Timer() as timerEpoch:
             random.shuffle(idContent)
@@ -320,30 +329,15 @@ def main():
                     "Loaded %20d Postive Simple in %15f sec from dataBatch %3d / %3d round %5d"
                     % (len(rawdata), timerPostiveSample.elapsed, dataBatch,
                        dataBatchCnt, roundid))
-
                 # -------------------------------
                 print("resampling for round %d dataBatch %d" %
                       (roundid, dataBatch))
                 data = []
                 for _ in range(NEG_GROUP):
-                    # with Pool(DATA_WORKERS) as pool:
                     data.extend(
                         map(
                             functools.partial(neg_sample, NEG_COUNT,
                                               wordBucket), rawdata))
-                # data = NegDataLoader(rawdata, wordBucket, NEG_COUNT, NEG_GROUP)
-                # print(1)
-                # negdata = next(
-                #     iter(
-                #         torch.utils.data.DataLoader(data,
-                #                                     batch_size=len(data),
-                #                                     num_workers=DATA_WORKERS,
-                #                                     shuffle=False)))
-                # print(2)
-                # finaldata = [(negdata[0][i], negdata[1][i], negdata[2][i])
-                #              for i in range(len(data))]
-                # print(finaldata[0:1])
-                # print(3)
                 dataloader = torch.utils.data.DataLoader(
                     data,
                     batch_size=BATCH_SIZE,
@@ -352,81 +346,63 @@ def main():
                     shuffle=False)
                 print("resampled for round %d databatch %d" %
                       (roundid, dataBatch))
+                negGroupAccloss = 0.0
+                negGroupMaxloss = 0.0
+                batchOfCurNegSample = 0
+                print("%10s %10s %10s" % ("epochloss", "lr", "epochcnt"))
                 for epoch in range(EPOCH_COUNT):
+                    epochaccloss = 0.0
+                    batchOfCurEpoch = 0
                     for i, data in enumerate(dataloader):
-                        # print(len(data[0]))
-                        with Timer() as timer:
+                        with Timer() as batchTimer:
                             net.zero_grad()
                             loss = net(data[0].to(DEVICE), data[1].to(DEVICE),
                                        data[2].to(DEVICE))
                             loss.backward()
-                            accumateloss += loss.item()
                             epochaccloss += loss.item()
                             optimizer.step()
-                        timeacc += timer.elapsed
-                        if outputcount % OUTPUT_INTERVAL == 0 and outputcount != 0:
-                            if outputtitlecount % OUTPUT_TITLE_INTERVAL == 0:
-                                print(
-                                    "%5s %5s %5s %10s %10s %10s %15s  %15s  %10s %10s %5s %5s %10s"
-                                    %
-                                    ("round", "epoch", "batch", "loss",
-                                     "epochloss", "last_eloss", "imporve_rate",
-                                     "last_im_rate", "lr", "momentum", "scnt",
-                                     "bcnt", "sec/batch"))
-                            curepochloss = epochaccloss / (batchcnt + 1)
-                            imporve_rate = (epochloss -
-                                            curepochloss) / epochloss
-                            print(
-                                "%5d %5d %5d %10f %10f %10f %15f%% %15f%% %10f %10f %5d %5d %10f"
-                                % (
-                                    roundid,
-                                    epoch,
-                                    i,
-                                    accumateloss / OUTPUT_INTERVAL,
-                                    curepochloss,
-                                    epochloss,
-                                    imporve_rate * 100.0,
-                                    imporve_rate_by_epoch * 100.0,
-                                    optimizer.param_groups[0]['lr'],
-                                    #optimizer.param_groups[0]['momentum'],
-                                    math.nan,
-                                    shrink_cnt,
-                                    back_count,
-                                    timeacc / OUTPUT_INTERVAL))
-                            accumateloss = 0.0
-                            timeacc = 0.0
-                            outputtitlecount += 1
-                        outputcount += 1
+                            #----------------------------------------------------------------
+                            writer.add_scalars("loss", {"batch": loss.item()},
+                                               batchcnt)
+                            #----------------------------------------------------------------
+                        #----------------------------------------------------------------
+                        writer.add_scalars("time",
+                                           {"batch": batchTimer.elapsed},
+                                           batchcnt)
+                        #----------------------------------------------------------------
                         batchcnt += 1
-                    epochcount += 1
-                    # if (epochloss - curepochloss)/epochloss < 0.0001
-                    curepochloss = epochaccloss / batchcnt
-                    imporve_rate_by_epoch = (epochloss -
-                                             curepochloss) / epochloss
+                        batchOfCurEpoch += 1
+                        batchOfCurNegSample += 1
+                    curepochloss = epochaccloss / batchOfCurEpoch
                     epochloss = curepochloss
-                    losses_for_shrink.append(imporve_rate_by_epoch)
-                    epochaccloss = 0.0
-                    batchcnt = 0
-                    # print(losses_for_shrink[-SHRINK_WINDOW:])
-                    back_count = [
-                        1 if l > 0 else 0
-                        for l in losses_for_shrink[-SHRINK_WINDOW:]
-                    ].count(0)
-                    # print(back_count)
-                    if back_count > SHRINK_THRESHOLD * SHRINK_WINDOW:
-                        # lr_tim *= SHRINK_RATE
-                        losses_for_shrink = []
-                        # shrink_cnt += 1
+                    negGroupAccloss += epochloss
+                    negGroupMaxloss = max(negGroupMaxloss, epochloss)
+                    #----------------------------------------------------------------
+                    writer.add_scalars("loss", {"epoch": epochloss},
+                                       batchcnt - batchOfCurEpoch // 2)
+                    # writer.add_scalar("lr", LR, batchcnt)
+                    print("%10f %10f %10d" % (epochloss, LR, epochcount))
+                    #----------------------------------------------------------------
+                    epochcount += 1
                     LR = get_lr(LR_FILE)
                     adjust_learning_rate(optimizer, epochcount, LR * lr_tim)
-                    if epochcount % SAVE_INTERVAL_BY_EPOCH == 0:
-                        pass
-                del rawdata
+
+                #----------------------------------------------------------------
+                writer.add_scalars(
+                    "loss", {
+                        "neg_avg": negGroupAccloss / EPOCH_COUNT,
+                        "neg_max": negGroupMaxloss
+                    }, batchcnt - batchOfCurNegSample // 2)
+                #----------------------------------------------------------------
+        #----------------------------------------------------------------
+        writer.add_scalar("epoch time", timerEpoch.elapsed, roundid)
+        #----------------------------------------------------------------
+
         torch.save(net.cpu(),
-                   NET_SAVE_FILENAME_TEMPLATE + "-%d.tr" % (epoch + 1))
+                   NET_SAVE_FILENAME_TEMPLATE % ("%d" % (roundid + 1)))
         net.to(DEVICE)
         print("epoch %15f sec" % (timerEpoch.elapsed))
-    torch.save(net.cpu(), NET_SAVE_FILENAME_TEMPLATE + "-Finished.tr")
+    torch.save(net.cpu(), NET_SAVE_FILENAME_TEMPLATE % ("Finished"))
 
 
 if __name__ == "__main__":
