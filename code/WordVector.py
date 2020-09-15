@@ -8,38 +8,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 import torch.optim as optim
-import math
-from pathlib import Path
-import os
-import gc
 import functools
-import datetime
 # from tensorboardX import SummaryWriter
 
 from torch.utils.tensorboard import SummaryWriter
-from Tools.Timer import Timer
-from Tools.ConfigLogger import LogConfig
-from Tools.GpuTempSensor import get_gpu_tem
+from code.Tools.Time import Timer, getTimeString
+from code.Tools.ConfigLogger import LogConfig
+from code.Tools.GpuTempSensor import get_gpu_tem
+from code.Tools.Mkdir import mkdirs
+from code.Tools.Ls import ls
+from code.Tools.LoggedType import LoggedFloat
+from code.Tools.Counter import Counter
 
-DATE_STRING = datetime.datetime.now().strftime("%Y-%m-%dT%H%M%S")
 # DATE_STRING = datetime.datetime.now().replace(microsecond=0).isoformat()
 
-
-def get_lr(filename: str):
-    with open(filename, 'r') as f:
-        return float(f.readline())
-
-
-def adjust_learning_rate(optimizer, epoch, lr):
-    """Sets the learning rate to the initial LR decayed by 10 every 2 epochs"""
-    # lr *= 1 / (epoch**0.5)
-    DELACY = 0.005
-    epoch = epoch * DELACY + 1.0
-    lr *= 2 / (1.0 + math.e**(epoch)) + (1 - 2 /
-                                         (1 + math.e**(epoch))) / (epoch**0.5)
-    if not math.isnan(lr):
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
 
 class WordVec(nn.Module):
     def __init__(self, size: int, length: int, window: int, MAX_NORM: float):
@@ -72,14 +54,16 @@ def neg_sample(NEG_COUNT, wordBucket, case):
             torch.LongTensor(random.sample(wordBucket, NEG_COUNT)))
 
 
-def loadDataFile(folder, sufix):
-    dirInfo = os.walk(folder)
-    files = []
-    for path, dir_list, file_list in dirInfo:
-        for file_name in file_list:
-            if file_name.endswith(sufix):
-                files.append(os.path.join(path, file_name))
-    return files
+def build_postive_samples(CONTEXT_WINDOW, raw):
+    samples = []
+    for i in range(CONTEXT_WINDOW, len(raw) - CONTEXT_WINDOW):
+        context = torch.LongTensor([
+            raw[j] for j in range(i - CONTEXT_WINDOW, i + CONTEXT_WINDOW + 1)
+            if j != i
+        ])
+        target = torch.LongTensor([raw[i]])
+        samples.append((context, target))
+    return samples
 
 
 def loadFile(path):
@@ -104,9 +88,10 @@ def getWordSetFromContent(content):
 
 
 def main():
+    DATE_STRING = getTimeString()
 
-    # DEBUG = False
-    DEBUG = True
+    DEBUG = False
+    # DEBUG = True
 
     OUTPUT_INTERVAL = 25  # output every OUTPUT_INTERVAL batch
     OUTPUT_TITLE_INTERVAL = 10  # print table title every OUTPUT_TITLE_INTERVAL output
@@ -130,16 +115,15 @@ def main():
     FREQ_HOLD = 1e-6
     FREQ_POW = 0.75  # magic number
     FREQ_MUL = 1000000
-    LR_FILE = "./lr.txt"
-    LR = get_lr(LR_FILE)
-    # LR = 0.0003
+    LR = 0.001
     MOMENTUM = 0.75
     DAMPENING = 0.1
-    NET_SAVE_FOLDER = "results/Adam/%s/net" % (DATE_STRING)
-    LOG_SAVE_FOLDER = "results/Adam/%s/log" % (DATE_STRING)
-    TEXT_SAVE_FOLDER = "results/Adam/%s/text" % (DATE_STRING)
+    SAVE_FOLDER_PREFIX = "results/WordVector/Adam/"
+    NET_SAVE_FOLDER = SAVE_FOLDER_PREFIX + "%s/net" % (DATE_STRING)
+    LOG_SAVE_FOLDER = SAVE_FOLDER_PREFIX + "%s/log" % (DATE_STRING)
+    TEXT_SAVE_FOLDER = SAVE_FOLDER_PREFIX + "%s/text" % (DATE_STRING)
     NET_SAVE_PREFIX = "net-%s.tr"
-    DATA_FOLDER = "../download/OANC-GrAF/data"
+    DATA_FOLDER = "./download/OANC-GrAF/data"
     DATA_SUFFIX = ".txt"
     DICTIONARY_PATH = TEXT_SAVE_FOLDER + "/dictionary.txt"
     WORD_COUNT_PATH = TEXT_SAVE_FOLDER + "/word_count.txt"
@@ -151,12 +135,9 @@ def main():
         NET_SAVE_PREFIX += "-DEBUG"
 
     NET_SAVE_FILENAME_TEMPLATE = NET_SAVE_FOLDER + "/" + NET_SAVE_PREFIX
-
-    for folder in [NET_SAVE_FOLDER, LOG_SAVE_FOLDER, TEXT_SAVE_FOLDER]:
-        Path(folder).mkdir(parents=True, exist_ok=True)
-
+    mkdirs([NET_SAVE_FOLDER, LOG_SAVE_FOLDER, TEXT_SAVE_FOLDER])
     writer = SummaryWriter(LOG_SAVE_FOLDER)
-    dataFiles = loadDataFile(DATA_FOLDER, DATA_SUFFIX)
+    dataFiles = ls(DATA_FOLDER, DATA_SUFFIX)
     fileContents = []
     wordset = []
     wordtoid = {}
@@ -166,8 +147,8 @@ def main():
     modifiedwordcount = {}
     wordBucket = []
     lengthCnt = 0
-
     LogConfig(locals(), writer)
+
     print("%10d data file found" % (len(dataFiles)))
     with Timer() as fileLoadTimer:
         for filePath in dataFiles:
@@ -246,10 +227,9 @@ def main():
     print("Start in %s mode" % (DEVICE))
 
     epochcount = 0
-    epochaccloss = 0.0
-    negGroupAccloss = 0.0
     batchcnt = 0
-    lr_tim = 1.
+    batchCounter = Counter()
+    epochCounter = Counter()
     for roundid in range(TRAIN_ROUND):
         with Timer() as timerEpoch:
             random.shuffle(idContent)
@@ -257,21 +237,13 @@ def main():
             # del rawdata
             for dataBatch in range(dataBatchCnt):
                 rawdata = []
-                gc.collect()
                 l = dataBatch * DATA_BATCH_SIZE
                 r = (dataBatch + 1) * DATA_BATCH_SIZE
                 with Timer() as timerPostiveSample:
                     pos_finish_cnt = 0
                     for idtext in idContent[l:r]:
-                        for i in range(CONTEXT_WINDOW,
-                                       len(idtext) - CONTEXT_WINDOW):
-                            context = torch.LongTensor([
-                                idtext[j]
-                                for j in range(i - CONTEXT_WINDOW, i +
-                                               CONTEXT_WINDOW + 1) if j != i
-                            ])
-                            target = torch.LongTensor([idtext[i]])
-                            rawdata.append((context, target))
+                        rawdata.extend(
+                            build_postive_samples(CONTEXT_WINDOW, idtext))
                         pos_finish_cnt += 1
                         # print("Postive Simple Progress %15d in %15d" %
                         #       (pos_finish_cnt, DATA_BATCH_SIZE),
@@ -297,62 +269,58 @@ def main():
                     shuffle=False)
                 print("resampled for round %d databatch %d" %
                       (roundid, dataBatch))
-                negGroupAccloss = 0.0
-                negGroupMaxloss = 0.0
-                batchOfCurNegSample = 0
+                negGrouploss = LoggedFloat()
+                negSampleLap = batchCounter.lap()
                 print("%10s %10s %10s" % ("epochloss", "lr", "epochcnt"))
                 for epoch in range(EPOCH_COUNT):
-                    epochaccloss = 0.0
-                    batchOfCurEpoch = 0
+                    epochLap = batchCounter.lap()
+                    epochloss = LoggedFloat()
                     for i, data in enumerate(dataloader):
                         with Timer() as batchTimer:
                             net.zero_grad()
                             loss = net(data[0].to(DEVICE), data[1].to(DEVICE),
                                        data[2].to(DEVICE))
                             loss.backward()
-                            epochaccloss += loss.item()
                             optimizer.step()
+
+                            epochloss.update(loss.item())
                             #----------------------------------------------------------------
                             writer.add_scalars("loss", {"batch": loss.item()},
-                                               batchcnt)
+                                               batchCounter.value)
                             #----------------------------------------------------------------
                         #----------------------------------------------------------------
                         writer.add_scalars("time",
                                            {"batch": batchTimer.elapsed},
-                                           batchcnt)
+                                           batchCounter.value)
                         #----------------------------------------------------------------
-                        batchcnt += 1
-                        batchOfCurEpoch += 1
-                        batchOfCurNegSample += 1
-                    curepochloss = epochaccloss / batchOfCurEpoch
-                    epochloss = curepochloss
-                    negGroupAccloss += epochloss
-                    negGroupMaxloss = max(negGroupMaxloss, epochloss)
+                        batchCounter.step()
                     #----------------------------------------------------------------
-                    writer.add_scalars("loss", {"epoch": epochloss},
-                                       batchcnt - batchOfCurEpoch // 2)
+                    writer.add_scalars(
+                        "loss", {
+                            "epoch_avg": epochloss.avg,
+                            "epoch_max": epochloss.max,
+                            "epoch_min": epochloss.min
+                        }, batchCounter.mean(epochLap))
                     writer.add_scalars("temp", {"GPU": get_gpu_tem()},
-                                       epochcount)
-                    # writer.add_scalar("lr", LR, batchcnt)
-                    print("%10f %10f %10d" % (epochloss, LR, epochcount))
+                                       epochCounter.value)
+                    print("%10f %10f %10d" %
+                          (epochloss.avg, LR, epochCounter.value))
                     #----------------------------------------------------------------
-                    epochcount += 1
-                    LR = get_lr(LR_FILE)
-                    adjust_learning_rate(optimizer, epochcount, LR * lr_tim)
-
+                    negGrouploss.update(epochloss.avg)
+                    epochCounter.step()
                 #----------------------------------------------------------------
                 writer.add_scalars(
                     "loss", {
-                        "neg_avg": negGroupAccloss / EPOCH_COUNT,
-                        "neg_max": negGroupMaxloss
-                    }, batchcnt - batchOfCurNegSample // 2)
+                        "neg_avg": negGrouploss.avg,
+                        "neg_max": negGrouploss.max,
+                        "neg_min": negGrouploss.min
+                    }, batchCounter.mean(negSampleLap))
                 #----------------------------------------------------------------
         #----------------------------------------------------------------
         writer.add_scalar("epoch time", timerEpoch.elapsed, roundid)
         #----------------------------------------------------------------
 
-        torch.save(net.cpu(),
-                   NET_SAVE_FILENAME_TEMPLATE % ("%d" % (roundid + 1)))
+        torch.save(net.cpu(), NET_SAVE_FILENAME_TEMPLATE % ("%d" % (roundid)))
         net.to(DEVICE)
         print("epoch %15f sec" % (timerEpoch.elapsed))
     torch.save(net.cpu(), NET_SAVE_FILENAME_TEMPLATE % ("Finished"))

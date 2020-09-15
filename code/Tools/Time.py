@@ -1,4 +1,9 @@
 import time
+import datetime
+
+
+def getTimeString(format="%Y-%m-%dT%H%M%S"):
+    return datetime.datetime.now().strftime(format)
 
 
 class Timer:
