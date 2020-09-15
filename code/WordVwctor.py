@@ -8,7 +8,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 import torch.optim as optim
-import time
 import math
 from pathlib import Path
 import os
@@ -16,44 +15,14 @@ import gc
 import functools
 import datetime
 # from tensorboardX import SummaryWriter
+
 from torch.utils.tensorboard import SummaryWriter
-import sys
+from Tools.Timer import Timer
+from Tools.ConfigLogger import LogConfig
+from Tools.GpuTempSensor import get_gpu_tem
 
 DATE_STRING = datetime.datetime.now().strftime("%Y-%m-%dT%H%M%S")
 # DATE_STRING = datetime.datetime.now().replace(microsecond=0).isoformat()
-
-
-class Timer:
-    def __init__(self, func=time.perf_counter):
-        self.elapsed = 0.0
-        self._func = func
-        self._start = None
-
-    def start(self):
-        if self._start is not None:
-            raise RuntimeError('Already started')
-        self._start = self._func()
-
-    def stop(self):
-        if self._start is None:
-            raise RuntimeError('Not started')
-        end = self._func()
-        self.elapsed += end - self._start
-        self._start = None
-
-    def reset(self):
-        self.elapsed = 0.0
-
-    @property
-    def running(self):
-        return self._start is not None
-
-    def __enter__(self):
-        self.start()
-        return self
-
-    def __exit__(self, *args):
-        self.stop()
 
 
 def get_lr(filename: str):
@@ -72,18 +41,6 @@ def adjust_learning_rate(optimizer, epoch, lr):
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
 
-
-def get_gpu_tem():
-    # shell_str = "tem_line=`nvidia-smi | grep %` && tem1=`echo $tem_line | cut -d C -f 1` " \
-    #             "&& tem2=`echo $tem1 | cut -d % -f 2` && echo $tem2"
-    shell_str = "nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader"
-    result = os.popen(shell_str)
-    result_str = result.read()
-    tem_str = result_str.split("\n")[0]
-    result.close()
-    return float(tem_str)
-
-
 class WordVec(nn.Module):
     def __init__(self, size: int, length: int, window: int, MAX_NORM: float):
         super(WordVec, self).__init__()
@@ -99,20 +56,12 @@ class WordVec(nn.Module):
         cent = self.wordvec(center)
         neg = self.wordvec(negcase)
         cont = self.contextvec(context)
-        # cent = torch.tanh(self.wordvec(center))
-        # neg = torch.tanh(self.wordvec(negcase))
-        # cont = torch.tanh(self.contextvec(context))
         cont = torch.mean(cont, dim=1, keepdim=True)
-        # print("size of cent:", cent.size())
-        # print("size of cont:", cont.size())
-        # print("size of neg:", neg.size())
         losspos = (torch.bmm(cont, cent.transpose(1, 2)))
         lossneg = (torch.bmm(cont, neg.transpose(1, 2)))
         losspos = -torch.log(1 / (1 + torch.exp(-losspos)))
         lossneg = -torch.log(1 / (1 + torch.exp(lossneg)))
         lossneg = torch.mean(lossneg, dim=2, keepdim=True)
-        # print("size of losspos: ", losspos.size())
-        # print("size of lossneg: ", lossneg.size())
         loss = (losspos.mean() + lossneg.mean())
         pass
         return (loss)
@@ -156,8 +105,8 @@ def getWordSetFromContent(content):
 
 def main():
 
-    DEBUG = False
-    # DEBUG = True
+    # DEBUG = False
+    DEBUG = True
 
     OUTPUT_INTERVAL = 25  # output every OUTPUT_INTERVAL batch
     OUTPUT_TITLE_INTERVAL = 10  # print table title every OUTPUT_TITLE_INTERVAL output
@@ -190,7 +139,7 @@ def main():
     LOG_SAVE_FOLDER = "results/Adam/%s/log" % (DATE_STRING)
     TEXT_SAVE_FOLDER = "results/Adam/%s/text" % (DATE_STRING)
     NET_SAVE_PREFIX = "net-%s.tr"
-    DATA_FOLDER = "../../download/OANC-GrAF/data"
+    DATA_FOLDER = "../download/OANC-GrAF/data"
     DATA_SUFFIX = ".txt"
     DICTIONARY_PATH = TEXT_SAVE_FOLDER + "/dictionary.txt"
     WORD_COUNT_PATH = TEXT_SAVE_FOLDER + "/word_count.txt"
@@ -217,22 +166,8 @@ def main():
     modifiedwordcount = {}
     wordBucket = []
     lengthCnt = 0
-    writer.add_text("info/PyTorch version", torch.__version__)
-    writer.add_text("info/Cuda version", str(torch.version.cuda))
-    writer.add_text("info/Cuda Device Count", str(torch.cuda.device_count()))
-    for i in range(torch.cuda.device_count()):
-        info = torch.cuda.get_device_properties(i)
-        writer.add_text(
-            "info/Cuda device/ %d : %s" % (i, info.name),
-            "CUDA CC %d.%d \nMEM %dMB \nMultiProcessorCount %d" %
-            (info.major, info.minor, info.total_memory /
-             (1024**2), info.multi_processor_count))
-    constant_regex = re.compile("^([A-Z]+_)*[A-Z]+$")
-    for (key, value) in locals().items():
-        if constant_regex.match(key):
-            writer.add_text("config/%s" % (key), str(value))
-    writer.add_text("info/Python version", sys.version)
-    writer.add_text("info/Data Folder", DATA_FOLDER)
+
+    LogConfig(locals(), writer)
     print("%10d data file found" % (len(dataFiles)))
     with Timer() as fileLoadTimer:
         for filePath in dataFiles:

@@ -1,6 +1,7 @@
 tmp/
 media/
 download/
+__pycache__
 events.out.tfevents.*
 *.tr
 *.txt
