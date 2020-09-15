@@ -1,5 +1,5 @@
 class LoggedFloat:
-    def __init__(self, min=float('-inf'), max=float('+inf')):
+    def __init__(self, min=float('+inf'), max=float('-inf')):
         self._MIN_ = min
         self._MAX_ = max
         self._sum_ = 0.0
